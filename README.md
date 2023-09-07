@@ -1,5 +1,5 @@
 ## Cython wrapper for CUDA/C++
 
-공부용
-
-cc
+based on
+- https://github.com/rmcgibbo/npcuda-example
+- https://github.com/oKatanaaa/CudaCythonSamples
