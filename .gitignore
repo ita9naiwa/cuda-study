@@ -1,0 +1,6 @@
+build/
+dist/
+cudaext.egg-info/
+
+*.so
+*.cpp
