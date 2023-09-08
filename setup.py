@@ -111,15 +111,11 @@ except AttributeError:
 print(CUDA['lib64'])
 extensions = [
         Extension('matsum',
-            sources=['src/kernel.cu', 'wrapper.pyx'],
+            sources=['src/matrix_arth.cu', 'cy_src/matrix_arth.pyx'],
             library_dirs=[CUDA['lib64']],
             libraries=['cudart'],
             language='c++',
             runtime_library_dirs=[CUDA['lib64']],
-            # This syntax is specific to this build system
-            # we're only going to use certain compiler args with nvcc
-            # and not with gcc the implementation of this trick is in
-            # customize_compiler()
             extra_compile_args= {
                 'gcc': [],
                 'nvcc': ['--ptxas-options=-v', '-c',
@@ -129,15 +125,27 @@ extensions = [
                 include_dirs=[numpy_include, CUDA['include'], 'src']
             ),
         Extension('kmeans',
-            sources=['src/kmeans.cu', 'kmeans.pyx'],
+            sources=['src/kmeans.cu', 'cy_src/kmeans.pyx'],
             library_dirs=[CUDA['lib64']],
             libraries=['cudart', 'cublas', 'gomp'],
             language='c++',
             runtime_library_dirs=[CUDA['lib64']],
-            # This syntax is specific to this build system
-            # we're only going to use certain compiler args with nvcc
-            # and not with gcc the implementation of this trick is in
-            # customize_compiler()
+            extra_compile_args= {
+                'gcc': [],
+                'nvcc': [
+                    '--ptxas-options=-v', '-c',
+                    '--compiler-options', "'-fPIC'",
+                    '-Xcompiler', '-fopenmp',
+                    ]
+                },
+                include_dirs=[numpy_include, CUDA['include'], 'src']
+            ),
+        Extension('als',
+            sources=['src/als.cu', 'cy_src/als.pyx'],
+            library_dirs=[CUDA['lib64']],
+            libraries=['cudart', 'cublas', 'gomp'],
+            language='c++',
+            runtime_library_dirs=[CUDA['lib64']],
             extra_compile_args= {
                 'gcc': [],
                 'nvcc': [

@@ -2,7 +2,7 @@ cimport cython
 from cython.parallel cimport prange
 import numpy as np
 
-cdef extern from "src/kernel.h":
+cdef extern from "../src/matrix_arth.h":
     float vec_sum(float *a, float *b, float *r, int n)
     float mat_sum(float *a, float *b, float *r, int m, int n)
     float mat_mul(float *a, float *b, float *r, int m, int k, int n)
