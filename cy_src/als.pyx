@@ -28,7 +28,12 @@ def cyALS(user_item_matrix, d, reg, max_iter, method='cpu_cg', num_threads=0):
     X = np.random.normal(0, 0.01, size=(n_users, d)).astype(np.float32)
     Y = np.random.normal(0, 0.01, size=(n_items, d)).astype(np.float32)
     for ep in range(max_iter):
-        if method == 'cpu_cg':
+        if method == 'cpu_ialspp':
+            _cyALS_iter_ialspp(u_indices, u_indptr, u_data, u_counts,
+                               X, Y, n_users, n_items, d, reg, 128, num_threads)
+            _cyALS_iter_ialspp(i_indices, i_indptr, i_data, i_counts,
+                               Y, X, n_items, n_users, d, reg, 128, num_threads)
+        elif method == 'cpu_cg':
             # user iter
             _cyALS_iter_CG(u_indices, u_indptr, u_data, u_counts,
                            X, Y, n_users, n_items, d, reg, num_threads)
@@ -105,7 +110,6 @@ def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
     cdef float fone = 1.0
     cdef float alpha, beta
     cdef int i, j, idx, u
-    cdef float *A
     cdef float *b
     cdef float *r
     cdef float *p
@@ -139,7 +143,6 @@ def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
             for cg_i in range(3):
                 # calculating Ap, without actually calculating (YTCuY)p
                 # it decomposes (YTY)p + (YT(Cu - 1Y)p
-                memset(Ap, 0, d * sizeof(float))
                 cython_blas.ssymv(b'U', &d, &fone, &base_A[0, 0], &d, p, &one, &zero, Ap, &one)
                 for idx in range(indptr[u], indptr[u + 1]):
                     i = indices[idx]
@@ -153,42 +156,92 @@ def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
                 alpha = -alpha
                 cython_blas.saxpy(&d, &alpha, Ap, &one, r, &one)
                 rtr_new = cython_blas.sdot(&d, r, &one, r, &one)
-                if alpha <= rtr:
+                if rtr_new <= 1e-10:
                     break
                 beta = rtr_new / rtr
                 for j in range(d):
                     p[j] = r[j] + beta * p[j]
                 rtr = rtr_new
-        free(A)
         free(b)
         free(r)
         free(p)
         free(Ap)
 
 @cython.cdivision(True)
-@cython.boundscheck(False)
-def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
+@cython.boundscheck(True)
+def _cyALS_iter_ialspp(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
            float[:, :] X, float[:, :] Y,
-           int n_users, int n_items, int d, float reg, int num_threads):
-    cdef float[:, :] YTY = np.dot(Y.T, Y)
-    cdef float[:, :] base_A = YTY + reg * np.eye(d, dtype=np.float32)
+           int n_users, int n_items, int d, float reg, int pi=32, int num_threads=0):
+    # https://arxiv.org/abs/2110.14044
+    if pi >= d:
+        return _cyALS_iter_CG(indices, indptr, data, counts, X, Y, n_users, n_items, d, reg, num_threads)
+    if (d % pi) != 0:
+        print(d % pi)
+        raise ValueError("d should be multiple of pi")
+
+    cdef float[:] pred = np.zeros_like(data).astype(np.float32)
+    cdef float[:, :] full_gramian = np.dot(Y.T, Y) + np.eye(d).astype(np.float32)
+    cdef float *x
+    cdef float *y
+    cdef float fone = 1.0, mone = -1.0, zero = 0.0
+    cdef float temp, c_ui
     cdef int one = 1
-    cdef float zero = 0.0
-    cdef float c_ui = 0.0
-    cdef float temp = 0.0
-    cdef float mone = -1.0
-    cdef float fone = 1.0
-    cdef float alpha, beta
-    cdef int i, j, idx, u
-    cdef float *A
-    cdef float *b
+    cdef int u, i, j, beg, idx, cg_i, k
     cdef float *r
     cdef float *p
     cdef float *Ap
-    cdef float pAp, rtr, rtr_new
-    cdef int cg_i
-    
+    cdef float *gramian
+    cdef float rtr, rtr_new, alpha, beta, pAp
+    for beg in range(0, d, pi):
+        with nogil, parallel(num_threads=num_threads):
+            gramian = <float*> malloc(pi * pi * sizeof(float))
+            for j in range(pi):
+                memcpy(gramian + pi * j, &full_gramian[beg + j, beg], pi * sizeof(float))
+            r = <float *>malloc(pi * sizeof(float))
+            p = <float *>malloc(pi * sizeof(float))
+            Ap = <float *>malloc(pi * sizeof(float))
+            for u in prange(n_users, schedule='dynamic', chunksize=8):
+                if indptr[u] == indptr[u + 1]:
+                    continue
+                x = &X[u, beg]
+                cython_blas.ssymv(b'U', &pi, &mone, gramian, &pi, x, &one, &zero, r, &one)
+                for idx in range(indptr[u], indptr[u + 1]):
+                    c_ui = data[idx]
+                    i = indices[idx]
+                    y = &Y[i, beg]
+                    temp = cython_blas.sdot(&pi, y, &one, x, &one)
+                    temp = c_ui - (c_ui - 1.0) * temp - pred[idx]
+                    cython_blas.saxpy(&pi, &temp, y, &one, r, &one)
 
+                memcpy(p, r, pi * sizeof(float))
+                rtr = cython_blas.sdot(&pi, r, &one, r, &one)
+                if rtr <= 1e-10:
+                    break
+                for cg_i in range(3):
+                    cython_blas.ssymv(b'U', &pi, &fone, gramian, &pi, p, &one, &zero, Ap, &one)
+                    for idx in range(indptr[u], indptr[u + 1]):
+                        y = &Y[i, beg]
+                        i = indices[idx]
+                        c_ui = data[idx]
+                        temp = (c_ui - 1.0) * cython_blas.sdot(&pi, y, &one, p, &one)
+                        cython_blas.saxpy(&pi, &temp, y, &one, Ap, &one)
+                    pAp = cython_blas.sdot(&pi, p, &one, Ap, &one)
+                    alpha = rtr / pAp
+                    cython_blas.saxpy(&pi, &alpha, p, &one, x, &one)
+                    alpha = -alpha
+                    cython_blas.saxpy(&pi, &alpha, Ap, &one, r, &one)
+                    rtr_new = cython_blas.sdot(&pi, r, &one, r, &one)
+                    if rtr_new <= 1e-10:
+                        break
+                    beta = rtr_new / rtr
+                    for k in range(pi):
+                        p[k] = r[k] + beta * p[k]
+                    rtr = rtr_new
+
+                for idx in range(indptr[u], indptr[u + 1]):
+                    i = indices[idx]
+                    y = &Y[i, beg]
+                    pred[idx] += cython_blas.sdot(&pi, y, &one, x, &one)
 
 
 @cython.cdivision(True)

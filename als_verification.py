@@ -11,7 +11,8 @@ _, ratings = get_movielens('1m')
 ratings = ratings.T.tocsr()
 tr, te = train_test_split(ratings, 0.8)
 
-dim = 128
+dim = 1024
+reg = 100.0
 def model_eval(X, Y, tr, te, K=10):
     """
         this exploits implicit's evaluation features
@@ -21,23 +22,27 @@ def model_eval(X, Y, tr, te, K=10):
     model.item_factors = Y
     return ranking_metrics_at_k(model, tr, te, K=10)
 
-implicit = ALS(factors=dim, iterations=5, use_gpu=False, use_cg=False, num_threads=0)
-prev = time.time()
-implicit.fit(tr)
-print("runtime", time.time() - prev)
-implicit = ALS(factors=dim, iterations=5, use_gpu=False, use_cg=True, num_threads=0)
-prev = time.time()
-implicit.fit(tr)
-print("runtime", time.time() - prev)
+# implicit = ALS(factors=dim, iterations=5, use_gpu=False, use_cg=False, num_threads=0)
+# prev = time.time()
+# implicit.fit(tr)
+# print("runtime", time.time() - prev)
+# implicit = ALS(factors=dim, iterations=5, use_gpu=False, use_cg=True, num_threads=0)
+# prev = time.time()
+# implicit.fit(tr)
+# print("runtime", time.time() - prev)
+
+# prev = time.time()
+# X, Y = cyALS(tr, d=dim, reg=reg, max_iter=5, num_threads=0, method='cpu_naive')
+# print("runtime", time.time() - prev)
+# print(model_eval(X, Y, tr, te))
+
 
 prev = time.time()
-X, Y = cyALS(tr, d=dim, reg=1.0, max_iter=5, num_threads=0, method='cpu_naive')
+X, Y = cyALS(tr, d=dim, reg=reg, max_iter=5, num_threads=0, method='cpu_cg')
 print("runtime", time.time() - prev)
 print(model_eval(X, Y, tr, te))
 
-
 prev = time.time()
-X, Y = cyALS(tr, d=dim, reg=1.0, max_iter=5, num_threads=0, method='cpu_cg')
+X, Y = cyALS(tr, d=dim, reg=reg, max_iter=5, num_threads=0, method='cpu_ialspp')
 print("runtime", time.time() - prev)
-
 print(model_eval(X, Y, tr, te))
