@@ -147,7 +147,7 @@ extensions = [
             language='c++',
             runtime_library_dirs=[CUDA['lib64']],
             extra_compile_args= {
-                'gcc': [],
+                'gcc': ["-fopenmp"],
                 'nvcc': [
                     '--ptxas-options=-v', '-c',
                     '--compiler-options', "'-fPIC'",

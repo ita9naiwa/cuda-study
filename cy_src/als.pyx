@@ -1,3 +1,5 @@
+import os
+
 cimport cython
 from cython cimport floating, integral
 from cython.parallel import parallel, prange
@@ -13,7 +15,9 @@ cimport scipy.linalg.cython_lapack as cython_lapack
 def get_mat_info(mat):
     return mat.indices, mat.indptr, mat.data
 
-def cyALS(user_item_matrix, d, reg, max_iter):
+def cyALS(user_item_matrix, d, reg, max_iter, method='cpu_cg', num_threads=0):
+    if num_threads == 0:
+        num_threads = os.cpu_count()
     n_users, n_items = user_item_matrix.shape
     item_user_matrix = user_item_matrix.transpose().tocsr()
     u_indices, u_indptr, u_data = get_mat_info(user_item_matrix)
@@ -24,19 +28,31 @@ def cyALS(user_item_matrix, d, reg, max_iter):
     X = np.random.normal(0, 0.01, size=(n_users, d)).astype(np.float32)
     Y = np.random.normal(0, 0.01, size=(n_items, d)).astype(np.float32)
     for ep in range(max_iter):
-        # user iter
-        _cyALS_iter_CG(u_indices, u_indptr, u_data, u_counts, X, Y, n_users, n_items, d, reg)
-        # item iter
-        _cyALS_iter_CG(i_indices, i_indptr, i_data, i_counts, Y, X, n_items, n_users, d, reg)
-        loss = _calculate_loss(u_indptr, u_indices, u_data, X, Y, reg)
-        print(loss)
+        if method == 'cpu_cg':
+            # user iter
+            _cyALS_iter_CG(u_indices, u_indptr, u_data, u_counts,
+                           X, Y, n_users, n_items, d, reg, num_threads)
+            # item iter
+            _cyALS_iter_CG(i_indices, i_indptr, i_data, i_counts,
+                           Y, X, n_items, n_users, d, reg, num_threads)
+        elif method == 'cpu_naive':
+            # user iter
+            _cyALS_iter(u_indices, u_indptr, u_data, u_counts, X, Y, n_users, n_items, d, reg,num_threads)
+            # item iter
+            _cyALS_iter(i_indices, i_indptr, i_data, i_counts, Y, X, n_items, n_users, d, reg, num_threads)
+        else:
+            _cyALS_iter(u_indices, u_indptr, u_data, u_counts, X, Y, n_users, n_items, d, reg,num_threads)
+            # item iter
+            _cyALS_iter(i_indices, i_indptr, i_data, i_counts, Y, X, n_items, n_users, d, reg, num_threads)
+        #loss = _calculate_loss(u_indptr, u_indices, u_data, X, Y, reg)
+        #print(loss)
     return X, Y
 
 @cython.cdivision(True)
 @cython.boundscheck(False)
 def _cyALS_iter(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
            float[:, :] X, float[:, :] Y,
-           int n_users, int n_items, int d, float reg):
+           int n_users, int n_items, int d, float reg, int num_threads):
     cdef float[:, :] YTY = np.dot(Y.T, Y)
     cdef float[:, :] base_A = YTY + reg * np.eye(d, dtype=np.float32)
     cdef int one = 1
@@ -47,10 +63,10 @@ def _cyALS_iter(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
     cdef int err
     cdef float *A
     cdef float *b
-    with nogil, parallel(num_threads=4):
+    with nogil, parallel(num_threads=num_threads):
         A = <float*> malloc(d * d * sizeof(float));
         b = <float*> malloc(d * sizeof(float))
-        for u in prange(n_users, schedule='dynamic'):
+        for u in prange(n_users, schedule='dynamic', chunksize=8):
             memcpy(A, &base_A[0, 0], d * d * sizeof(float))
             memset(b, 0, d * sizeof(float))
             for idx in range(indptr[u], indptr[u + 1]):
@@ -73,11 +89,12 @@ def _cyALS_iter(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
         free(A)
         free(b)
 
+
 @cython.cdivision(True)
 @cython.boundscheck(False)
 def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
            float[:, :] X, float[:, :] Y,
-           int n_users, int n_items, int d, float reg):
+           int n_users, int n_items, int d, float reg, int num_threads):
     cdef float[:, :] YTY = np.dot(Y.T, Y)
     cdef float[:, :] base_A = YTY + reg * np.eye(d, dtype=np.float32)
     cdef int one = 1
@@ -89,42 +106,46 @@ def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
     cdef float alpha, beta
     cdef int i, j, idx, u
     cdef float *A
-    cdef float *b, *r, *p, *Ap
-    cdef float rsize
-    cdef float pAp
-    cdef float rtr, rtr_new
+    cdef float *b
+    cdef float *r
+    cdef float *p
+    cdef float *Ap
+    cdef float pAp, rtr, rtr_new
     cdef int cg_i
-    with nogil, parallel(num_threads=4):
-        A = <float*> malloc(d * d * sizeof(float));
+    with nogil, parallel(num_threads=num_threads):
         b = <float*> malloc(d * sizeof(float))
         r = <float*> malloc(d * sizeof(float))
         p = <float*> malloc(d * sizeof(float))
         Ap = <float*> malloc(d * sizeof(float))
-        memset(r, 0, d * sizeof(float))
-        for u in prange(n_users, schedule='dynamic'):
-            memcpy(A, &base_A[0, 0], d * d * sizeof(float))
-            memset(b, 0, d * sizeof(float))
+        for u in prange(n_users, schedule='dynamic', chunksize=8):
+            if indptr[u] == indptr[u + 1]:
+                continue
+            # calculating r_0
+            # https://github.com/benfred/implicit/blob/main/implicit/cpu/_als.pyx#L188
+            cython_blas.ssymv(b'U', &d, &mone, &base_A[0, 0], &d, &X[u, 0], &one, &zero, r, &one)
             for idx in range(indptr[u], indptr[u + 1]):
                 c_ui = data[idx]
                 i = indices[idx]
                 # B
-                cython_blas.saxpy(&d, &c_ui, &Y[i, 0], &one, b, &one)
-                for j in range(d):
-                    temp = (c_ui - 1.0) * Y[i, j]
-                    cython_blas.saxpy(&d, &temp, &Y[i, 0], &one, A + d * j, &one)
-            memcpy(r, b, d * sizeof(float))
+                temp = cython_blas.sdot(&d, &Y[i, 0], &one, &X[u, 0], &one)
+                temp = c_ui - (c_ui - 1.0) * temp
+                cython_blas.saxpy(&d, &temp, &Y[i, 0], &one, r, &one)
 
-            #https://en.wikipedia.org/wiki/Conjugate_gradient_method
-
-            # calculating r_0
-            cython_blas.ssymv(b'U', &d, &mone, A, &d, &X[u, 0], &one, &fone, r, &one)
+            # https://en.wikipedia.org/wiki/Conjugate_gradient_method
+            memcpy(p, r, d * sizeof(float))
             rtr = cython_blas.sdot(&d, r, &one, r, &one)
             if rtr <= 1e-10:
                 break
-            memcpy(p, r, d * sizeof(float))
             for cg_i in range(3):
-                # calculating Ap
-                cython_blas.ssymv(b'U', &d, &fone, A, &d, p, &one, &zero, Ap, &one)
+                # calculating Ap, without actually calculating (YTCuY)p
+                # it decomposes (YTY)p + (YT(Cu - 1Y)p
+                memset(Ap, 0, d * sizeof(float))
+                cython_blas.ssymv(b'U', &d, &fone, &base_A[0, 0], &d, p, &one, &zero, Ap, &one)
+                for idx in range(indptr[u], indptr[u + 1]):
+                    i = indices[idx]
+                    c_ui = data[idx]
+                    temp = (c_ui - 1.0) * cython_blas.sdot(&d, &Y[i, 0], &one, p, &one)
+                    cython_blas.saxpy(&d, &temp, &Y[i, 0], &one, Ap, &one)
                 # calculating pAp
                 pAp = cython_blas.sdot(&d, p, &one, Ap, &one)
                 alpha = rtr / pAp
@@ -138,12 +159,35 @@ def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
                 for j in range(d):
                     p[j] = r[j] + beta * p[j]
                 rtr = rtr_new
-
         free(A)
         free(b)
         free(r)
         free(p)
         free(Ap)
+
+@cython.cdivision(True)
+@cython.boundscheck(False)
+def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
+           float[:, :] X, float[:, :] Y,
+           int n_users, int n_items, int d, float reg, int num_threads):
+    cdef float[:, :] YTY = np.dot(Y.T, Y)
+    cdef float[:, :] base_A = YTY + reg * np.eye(d, dtype=np.float32)
+    cdef int one = 1
+    cdef float zero = 0.0
+    cdef float c_ui = 0.0
+    cdef float temp = 0.0
+    cdef float mone = -1.0
+    cdef float fone = 1.0
+    cdef float alpha, beta
+    cdef int i, j, idx, u
+    cdef float *A
+    cdef float *b
+    cdef float *r
+    cdef float *p
+    cdef float *Ap
+    cdef float pAp, rtr, rtr_new
+    cdef int cg_i
+    
 
 
 
@@ -167,7 +211,7 @@ def _calculate_loss(integral[:] indptr, integral[:] indices, float[:] data,
     with nogil, parallel(num_threads=num_threads):
         r = <float *> malloc(sizeof(float) * N)
         try:
-            for u in prange(users, schedule='dynamic', chunksize=8):
+            for u in prange(users, schedule='static', chunksize=4):
                 # calculates (A.dot(Xu) - 2 * b).dot(Xu), without calculating A
                 temp = 1.0
                 cython_blas.ssymv(b"U", &N, &temp, &YtY[0, 0], &N, &X[u, 0], &one, &zero, r, &one)
