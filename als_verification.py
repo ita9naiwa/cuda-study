@@ -1,19 +1,20 @@
 import os
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
-from als import cyALS
+from als import cyALS, cuALS
 import time
 import numpy as np
 from implicit.datasets.movielens import get_movielens
 from implicit.evaluation import train_test_split, ranking_metrics_at_k
 from implicit.als import AlternatingLeastSquares as ALS
-_, ratings = get_movielens('100k')
+_, ratings = get_movielens('1m')
 ratings = ratings.T.tocsr()
 tr, te = train_test_split(ratings, 0.8)
 
 dim = 32
 reg = 100.0
 
+print(tr.indices.shape, tr.nnz)
 
 def model_eval(X, Y, tr, te, K=10):
     """
@@ -51,17 +52,17 @@ def model_eval(X, Y, tr, te, K=10):
 # print(model_eval(X, Y, tr, te))
 
 
-dim = 32
+dim = 256
 reg = 0
-iter = 1
+max_iter = 10
+
 prev = time.time()
-X, Y = cyALS(tr, d=dim, reg=reg, max_iter=iter, num_threads=0, method='cpu_cg')
+X, Y = cyALS(tr, d=dim, reg=reg, max_iter=max_iter, num_threads=0, method='cg')
 print("runtime", time.time() - prev)
 print(model_eval(X, Y, tr, te))
 
 
-
 prev = time.time()
-X, Y = cyALS(tr, d=dim, reg=reg, max_iter=iter, num_threads=0, method='gpu_naive')
+X, Y = cuALS(tr, d=dim, reg=reg, max_iter=max_iter, method='naive')
 print("runtime", time.time() - prev)
 print(model_eval(X, Y, tr, te))
