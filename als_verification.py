@@ -52,8 +52,8 @@ def model_eval(X, Y, tr, te, K=10):
 # print(model_eval(X, Y, tr, te))
 
 
-dim = 256
-reg = 0
+dim = 512
+reg = 1.0
 max_iter = 10
 
 prev = time.time()
@@ -63,6 +63,6 @@ print(model_eval(X, Y, tr, te))
 
 
 prev = time.time()
-X, Y = cuALS(tr, d=dim, reg=reg, max_iter=max_iter, method='naive')
+X, Y = cuALS(tr, d=dim, reg=reg, max_iter=max_iter)
 print("runtime", time.time() - prev)
 print(model_eval(X, Y, tr, te))

@@ -56,7 +56,9 @@ __global__ void als_kernel
             float c_ui = data[idx];
             float *y = &Y[iid * d + block_beg];
             float y_tx_u = dot(x, y);
-            r[i] += (c_ui - (c_ui - 1.0) * y_tx_u) * y[i];
+
+            r[i] += ((1.0 - pred[idx]) * c_ui - (c_ui - 1.0) * y_tx_u) * y[i];
+            // r[i] += (c_ui - (c_ui - 1.0) * y_tx_u) * y[i];
         }
         p[i] = r[i];
         __syncthreads();
@@ -100,10 +102,6 @@ __global__ void als_kernel
         }
         __syncthreads();
     }
-}
-__global__ void als_cg_kernel
-() {
-    // pass
 }
 
 int load_matrix_to_cuda_memory(int **dev_indices,
@@ -174,10 +172,9 @@ void _cuALS_iter2
     float *dev_pred;
     float alpha, beta;
     CUDA_CHECK(cudaMalloc(&dev_YtY, sizeof(float) * d * d));
-    CUDA_CHECK(cudaMalloc(&dev_pred, sizeof(float) * n_users));
+    CUDA_CHECK(cudaMalloc(&dev_pred, sizeof(float) * nnz));
     CUDA_CHECK(cudaMalloc(&dev_partial_gramian, sizeof(float) * block_size * block_size));
-
-    CUDA_CHECK(cudaMemset(dev_pred, 0, sizeof(float) * n_users));
+    CUDA_CHECK(cudaMemset(dev_pred, 0, sizeof(float) * nnz));
     alpha = 1.0, beta = 0.;
     CUBLAS_CHECK(cublasSgemm(global_handle,
             CUBLAS_OP_N, CUBLAS_OP_T,
