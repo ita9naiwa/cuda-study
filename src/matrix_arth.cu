@@ -2,16 +2,17 @@
 #include <math.h>
 #include <common.h>
 
-int ceili(float x) {
-    return llrint(x + 1.0);
-}
 
 __global__ void cudaSum
 (float *g_idata, float *g_jdata, float *g_odata, int n) {
     extern __shared__ float sdata[];
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n)
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x;
+        i < n;
+        i += blockDim.x * gridDim.x)
+      {
         g_odata[i] = g_jdata[i] + g_idata[i];
+      }
+
 }
 
 float vec_sum(float *a, float *b, float *r, int n) {
@@ -24,7 +25,11 @@ float vec_sum(float *a, float *b, float *r, int n) {
     CUDA_CHECK(cudaMalloc(&dev_odata, n_bytes_in));
     CUDA_CHECK(cudaMemcpy(dev_idata, a, n_bytes_in, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(dev_jdata, b, n_bytes_in, cudaMemcpyHostToDevice));
-    cudaSum<<< llrint((n / 1024) + 1.0), 1024 >>>(dev_idata, dev_jdata, dev_odata, n);
+    // cudaSum<<< llrint((n / 1024) + 1.0), 1024 >>>(dev_idata, dev_jdata, dev_odata, n);
+    int numSMs;
+    cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, 0);
+
+    cudaSum<<< 32 * numSMs, 256 >>>(dev_idata, dev_jdata, dev_odata, n);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaMemcpy(r, dev_odata, n_bytes_in, cudaMemcpyDeviceToHost));

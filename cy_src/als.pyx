@@ -1,4 +1,5 @@
 import os
+from tqdm import tqdm
 
 cimport cython
 from cython cimport floating, integral
@@ -7,10 +8,24 @@ from cython.parallel import parallel, prange
 import numpy as np
 from libc.stdlib cimport free, malloc
 from libc.string cimport memcpy, memset
-
 cimport scipy.linalg.cython_blas as cython_blas
 cimport scipy.linalg.cython_lapack as cython_lapack
 
+cdef extern from "../src/als.h":
+    void _cuALS_iter(int *indices, int *indptr, float* data, int *counts, int nnz,
+                    float *X, float *Y,
+                    int n_users, int n_items,
+                    int d, float reg)
+    pass
+def cuALS_iter(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
+               float[:, :] X, float[:, :] Y, int n_users, int n_items, int d, float reg):
+    cdef int nnz = counts.shape[0]
+    _cuALS_iter(
+        &indices[0], &indptr[0], &data[0], &counts[0], nnz,
+        &X[0, 0], &Y[0, 0],
+        n_users, n_items,
+        d, reg
+    )
 
 def get_mat_info(mat):
     return mat.indices, mat.indptr, mat.data
@@ -24,10 +39,10 @@ def cyALS(user_item_matrix, d, reg, max_iter, method='cpu_cg', num_threads=0):
     i_indices, i_indptr, i_data = get_mat_info(item_user_matrix)
     u_counts = np.ediff1d(u_indices)
     i_counts = np.ediff1d(i_indices)
-
     X = np.random.normal(0, 0.01, size=(n_users, d)).astype(np.float32)
     Y = np.random.normal(0, 0.01, size=(n_items, d)).astype(np.float32)
-    for ep in range(max_iter):
+
+    for ep in tqdm(range(max_iter)):
         if method == 'cpu_ialspp':
             _cyALS_iter_ialspp(u_indices, u_indptr, u_data, u_counts,
                                X, Y, n_users, n_items, d, reg, 128, num_threads)
@@ -35,16 +50,18 @@ def cyALS(user_item_matrix, d, reg, max_iter, method='cpu_cg', num_threads=0):
                                Y, X, n_items, n_users, d, reg, 128, num_threads)
         elif method == 'cpu_cg':
             # user iter
-            _cyALS_iter_CG(u_indices, u_indptr, u_data, u_counts,
-                           X, Y, n_users, n_items, d, reg, num_threads)
+            _cyALS_iter_CG(u_indices, u_indptr, u_data, u_counts, X, Y, n_users, n_items, d, reg, num_threads)
             # item iter
-            _cyALS_iter_CG(i_indices, i_indptr, i_data, i_counts,
-                           Y, X, n_items, n_users, d, reg, num_threads)
+            _cyALS_iter_CG(i_indices, i_indptr, i_data, i_counts, Y, X, n_items, n_users, d, reg, num_threads)
         elif method == 'cpu_naive':
             # user iter
             _cyALS_iter(u_indices, u_indptr, u_data, u_counts, X, Y, n_users, n_items, d, reg,num_threads)
             # item iter
             _cyALS_iter(i_indices, i_indptr, i_data, i_counts, Y, X, n_items, n_users, d, reg, num_threads)
+        elif method == 'gpu_naive':
+            cuALS_iter(u_indices, u_indptr, u_data, u_counts, X, Y, n_users, n_items, d, reg)
+            # item iter
+            cuALS_iter(i_indices, i_indptr, i_data, i_counts, Y, X, n_items, n_users, d, reg)
         else:
             _cyALS_iter(u_indices, u_indptr, u_data, u_counts, X, Y, n_users, n_items, d, reg,num_threads)
             # item iter
@@ -116,8 +133,8 @@ def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
     cdef float *Ap
     cdef float pAp, rtr, rtr_new
     cdef int cg_i
+    #print(base_A[0, 0], base_A[0, 1], base_A[0, 2], base_A[0, 3])
     with nogil, parallel(num_threads=num_threads):
-        b = <float*> malloc(d * sizeof(float))
         r = <float*> malloc(d * sizeof(float))
         p = <float*> malloc(d * sizeof(float))
         Ap = <float*> malloc(d * sizeof(float))
@@ -137,6 +154,7 @@ def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
 
             # https://en.wikipedia.org/wiki/Conjugate_gradient_method
             memcpy(p, r, d * sizeof(float))
+
             rtr = cython_blas.sdot(&d, r, &one, r, &one)
             if rtr <= 1e-10:
                 break
@@ -147,10 +165,13 @@ def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
                 for idx in range(indptr[u], indptr[u + 1]):
                     i = indices[idx]
                     c_ui = data[idx]
+
                     temp = (c_ui - 1.0) * cython_blas.sdot(&d, &Y[i, 0], &one, p, &one)
                     cython_blas.saxpy(&d, &temp, &Y[i, 0], &one, Ap, &one)
                 # calculating pAp
                 pAp = cython_blas.sdot(&d, p, &one, Ap, &one)
+                #with gil:
+                    #print(Ap[0], Ap[1]);
                 alpha = rtr / pAp
                 cython_blas.saxpy(&d, &alpha, p, &one, &X[u, 0], &one)
                 alpha = -alpha
@@ -162,13 +183,12 @@ def _cyALS_iter_CG(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
                 for j in range(d):
                     p[j] = r[j] + beta * p[j]
                 rtr = rtr_new
-        free(b)
         free(r)
         free(p)
         free(Ap)
 
 @cython.cdivision(True)
-@cython.boundscheck(True)
+@cython.boundscheck(False)
 def _cyALS_iter_ialspp(int[:] indices, int[:]indptr, float[:] data, int[:] counts,
            float[:, :] X, float[:, :] Y,
            int n_users, int n_items, int d, float reg, int pi=32, int num_threads=0):
@@ -210,7 +230,7 @@ def _cyALS_iter_ialspp(int[:] indices, int[:]indptr, float[:] data, int[:] count
                     i = indices[idx]
                     y = &Y[i, beg]
                     temp = cython_blas.sdot(&pi, y, &one, x, &one)
-                    temp = c_ui - (c_ui - 1.0) * temp - pred[idx]
+                    temp = (1.0 - pred[idx]) * c_ui - (c_ui - 1.0) * temp
                     cython_blas.saxpy(&pi, &temp, y, &one, r, &one)
 
                 memcpy(p, r, pi * sizeof(float))

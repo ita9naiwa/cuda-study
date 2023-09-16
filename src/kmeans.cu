@@ -10,17 +10,15 @@
 
 #include "cublas_v2.h"
 
-int ceili(float x) {
-    return llrint(x + 1.0);
-}
-
 
 __global__ void __find_belonging
 (float *dev_vecs, float *dev_centroids, float *dev_dists, int n, int d, int K) {
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
-    for(int j = 0; j < K; ++j) {
-        for(int k = 0; k < d; ++k) {
-            dev_dists[i * K + j] += (dev_vecs[i * d + k] - dev_centroids[j * d + k]) * (dev_vecs[i * d + k] - dev_centroids[j * d + k]);
+
+    for(int i = blockDim.x * blockIdx.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
+        for(int j = 0; j < K; ++j) {
+            for(int k = 0; k < d; ++k) {
+                dev_dists[i * K + j] += (dev_vecs[i * d + k] - dev_centroids[j * d + k]) * (dev_vecs[i * d + k] - dev_centroids[j * d + k]);
+            }
         }
     }
 }
@@ -71,7 +69,10 @@ float cu_kmeans
     for(int epoch = 0; epoch < iter; ++epoch) {
         CUDA_CHECK(cudaMemset(dev_dists, 0, n * K * sizeof(float)));
         dim3 block_size(256, 1, 1);
-        dim3 grid_size(ceili(n / block_size.x), 1, 1);
+        int numSMs;
+        // https://developer.nvidia.com/blog/cuda-pro-tip-write-flexible-kernels-grid-stride-loops/
+        cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, 0);
+        dim3 grid_size(32 * numSMs, 1, 1);
         __find_belonging<<<grid_size, block_size>>>(dev_vecs, dev_centroids, dev_dists, n, d, K);
         CUDA_CHECK(cudaMemcpy(dists, dev_dists, n * K * sizeof(float), cudaMemcpyDeviceToHost));
 

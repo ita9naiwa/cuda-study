@@ -3,7 +3,7 @@ import numpy as np
 import time
 
 
-n = 10000000
+n = 100000
 d = 100
 vecs = np.random.normal(0, 10, size=(n, d)).astype(np.float32)
 pre = time.time()
